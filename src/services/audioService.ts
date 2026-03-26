@@ -3,30 +3,66 @@ export const audioService = {
   audioContext: null as AudioContext | null,
   analyser: null as AnalyserNode | null,
   dataArray: null as Uint8Array | null,
+  hasMic: false,
 
   async initialize() {
     if (this.stream) return;
-    try {
-      // WebRTC 에코 캔슬링 및 소음 억제 제약 조건 적용
-      this.stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        } 
-      });
-      
-      // 초기에는 마이크 비활성화 (PTT 동작)
-      this.stream.getAudioTracks().forEach(track => {
-        track.enabled = false;
-      });
+    
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      const error = new Error('이 브라우저는 마이크 접근을 지원하지 않습니다.');
+      console.error(error.message);
+      throw error;
+    }
 
-      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const source = this.audioContext.createMediaStreamSource(this.stream);
-      this.analyser = this.audioContext.createAnalyser();
-      this.analyser.fftSize = 256;
-      source.connect(this.analyser);
-      this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+    try {
+      // 1. 선호하는 제약 조건으로 시도 (에코 캔슬링, 소음 억제 등)
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          } 
+        });
+        this.hasMic = true;
+        console.log('Audio initialized with preferred constraints.');
+      } catch (err) {
+        console.warn('Preferred audio constraints failed, falling back to basic audio:', err);
+        // 2. 기본 오디오로 폴백 (제약 조건 없이)
+        try {
+          this.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          this.hasMic = true;
+          console.log('Audio initialized with basic constraints.');
+        } catch (fallbackErr) {
+          console.warn('Basic audio constraints also failed:', fallbackErr);
+          // 3. 마이크가 없는 경우 (NotFoundError) - 에러를 던지지 않고 '수신 전용' 모드로 진입 허용
+          if (fallbackErr instanceof Error && (fallbackErr.name === 'NotFoundError' || fallbackErr.name === 'DevicesNotFoundError')) {
+            console.warn('No microphone found. Entering listen-only mode.');
+            this.hasMic = false;
+            this.stream = null;
+          } else {
+            throw fallbackErr;
+          }
+        }
+      }
+      
+      // 마이크가 있는 경우에만 오디오 컨텍스트 및 분석기 설정
+      if (this.stream) {
+        // 초기에는 마이크 비활성화 (PTT 동작)
+        this.stream.getAudioTracks().forEach(track => {
+          track.enabled = false;
+        });
+
+        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const source = this.audioContext.createMediaStreamSource(this.stream);
+        this.analyser = this.audioContext.createAnalyser();
+        this.analyser.fftSize = 256;
+        source.connect(this.analyser);
+        this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+      } else {
+        // 마이크가 없어도 비프음 재생 등을 위해 AudioContext는 생성
+        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
     } catch (err) {
       console.error('Failed to initialize audio:', err);
       throw err;
