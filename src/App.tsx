@@ -71,7 +71,7 @@ interface RemoteAudioProps {
   volumeMultiplier: number;
 }
 
-const RemoteAudio: React.FC<RemoteAudioProps> = ({ stream, volumeMultiplier }) => {
+const RemoteAudio: React.FC<RemoteAudioProps & { onBlocked?: (blocked: boolean) => void }> = ({ stream, volumeMultiplier, onBlocked }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
@@ -104,6 +104,19 @@ const RemoteAudio: React.FC<RemoteAudioProps> = ({ stream, volumeMultiplier }) =
     }
   }, []);
 
+  const attemptPlay = useCallback(async () => {
+    if (audioRef.current) {
+      try {
+        await audioRef.current.play();
+        if (onBlocked) onBlocked(false);
+        console.log('Remote audio playback started successfully.');
+      } catch (err) {
+        console.warn('Remote audio playback blocked by browser:', err);
+        if (onBlocked) onBlocked(true);
+      }
+    }
+  }, [onBlocked]);
+
   useEffect(() => {
     if (!stream) return;
 
@@ -134,6 +147,7 @@ const RemoteAudio: React.FC<RemoteAudioProps> = ({ stream, volumeMultiplier }) =
       // 증폭된 스트림을 오디오 태그에 연결
       audioRef.current.srcObject = dest.stream;
       forceSpeakerOutput(audioRef.current);
+      attemptPlay();
     }
 
     return () => {
@@ -141,7 +155,7 @@ const RemoteAudio: React.FC<RemoteAudioProps> = ({ stream, volumeMultiplier }) =
       gainNode.disconnect();
       gainNodeRef.current = null;
     };
-  }, [stream, forceSpeakerOutput]);
+  }, [stream, forceSpeakerOutput, attemptPlay]);
 
   useEffect(() => {
     if (gainNodeRef.current) {
@@ -154,14 +168,15 @@ const RemoteAudio: React.FC<RemoteAudioProps> = ({ stream, volumeMultiplier }) =
   return (
     <audio
       ref={audioRef}
-      autoPlay
-      playsInline
+      autoPlay={true}
+      playsInline={true}
       muted={false} // 절대 음소거되지 않아야 함 (상대방 목소리)
       style={{ display: 'none' }}
       onLoadedMetadata={() => {
         if (audioRef.current) {
           audioRef.current.volume = 1.0; // HTML 오디오 볼륨 최대치
           forceSpeakerOutput(audioRef.current);
+          attemptPlay();
         }
       }}
     />
@@ -203,6 +218,7 @@ export default function App() {
   const [incomingVolume, setIncomingVolume] = useState(0.8);
   const [showVolumeControl, setShowVolumeControl] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [isAudioBlocked, setIsAudioBlocked] = useState(false);
   
   // Screen Wake Lock 상태 관리
   const wakeLockRef = useRef<any>(null);
@@ -570,8 +586,43 @@ export default function App() {
 
       {/* 상대방 오디오 증폭 재생 (GainNode + Autoplay Policy 우회) */}
       {(Object.entries(remoteStreams) as [string, MediaStream][]).map(([id, stream]) => (
-        <RemoteAudio key={id} stream={stream} volumeMultiplier={incomingVolume} />
+        <RemoteAudio 
+          key={id} 
+          stream={stream} 
+          volumeMultiplier={incomingVolume} 
+          onBlocked={setIsAudioBlocked}
+        />
       ))}
+
+      {/* 오디오 자동재생 차단 시 복구 UI */}
+      <AnimatePresence>
+        {isAudioBlocked && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-md flex items-center justify-center p-8"
+          >
+            <div className="text-center">
+              <div className="w-20 h-20 bg-industrial-accent rounded-full mx-auto flex items-center justify-center mb-6 animate-bounce">
+                <Volume2 size={40} className="text-black" />
+              </div>
+              <h2 className="text-2xl font-black text-white mb-4">오디오 재생이 차단되었습니다</h2>
+              <p className="text-industrial-muted mb-8">브라우저 정책에 의해 소리가 들리지 않을 수 있습니다.<br/>아래 버튼을 눌러 소리를 활성화해주세요.</p>
+              <button
+                onClick={async () => {
+                  await audioService.unlockAudio();
+                  setIsAudioBlocked(false);
+                  if ('vibrate' in navigator) navigator.vibrate(100);
+                }}
+                className="w-full bg-industrial-accent text-black font-black py-6 rounded-2xl text-xl shadow-[0_0_30px_rgba(255,215,0,0.4)]"
+              >
+                소리 활성화하기
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       <AnimatePresence mode="wait">
         {view === 'AUTH' ? (
