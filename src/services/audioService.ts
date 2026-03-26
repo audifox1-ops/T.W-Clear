@@ -7,6 +7,7 @@ export const audioService = {
   async initialize() {
     if (this.stream) return;
     try {
+      // WebRTC 에코 캔슬링 및 소음 억제 제약 조건 적용
       this.stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
@@ -15,7 +16,7 @@ export const audioService = {
         } 
       });
       
-      // Mute by default (PTT behavior)
+      // 초기에는 마이크 비활성화 (PTT 동작)
       this.stream.getAudioTracks().forEach(track => {
         track.enabled = false;
       });

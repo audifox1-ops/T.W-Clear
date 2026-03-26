@@ -119,6 +119,29 @@ const RemoteAudio: React.FC<RemoteAudioProps> = ({ stream, volumeMultiplier }) =
   );
 };
 
+/**
+ * 내 마이크 오디오 컴포넌트 (에코 방지를 위해 반드시 muted 처리)
+ */
+const LocalAudio = ({ stream }: { stream: MediaStream | null }) => {
+  const audioRef = useRef<HTMLAudioElement>(null);
+
+  useEffect(() => {
+    if (audioRef.current && stream) {
+      audioRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
+  return (
+    <audio
+      ref={audioRef}
+      autoPlay
+      playsInline
+      muted={true} // 내 목소리가 내 스피커로 나가지 않도록 음소거
+      style={{ display: 'none' }}
+    />
+  );
+};
+
 export default function App() {
   const [view, setView] = useState<View>('AUTH');
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -130,6 +153,7 @@ export default function App() {
   const [showMembersList, setShowMembersList] = useState(false);
   const [incomingVolume, setIncomingVolume] = useState(0.8);
   const [showVolumeControl, setShowVolumeControl] = useState(false);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   
   // 로그인 입력 상태
   const [inputName, setInputName] = useState('');
@@ -195,9 +219,9 @@ export default function App() {
       }
     };
 
-    const localStream = audioService.getStream();
-    if (localStream) {
-      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+    const stream = audioService.getStream();
+    if (stream) {
+      stream.getTracks().forEach(track => pc.addTrack(track, stream));
     }
 
     if (isInitiator) {
@@ -300,6 +324,7 @@ export default function App() {
   useEffect(() => {
     if (view === 'PTT') {
       audioService.initialize().then(() => {
+        setLocalStream(audioService.getStream());
         visualizerIntervalRef.current = window.setInterval(() => {
           setVolume(audioService.getVolume());
         }, 50);
@@ -307,6 +332,7 @@ export default function App() {
     } else {
       if (visualizerIntervalRef.current) clearInterval(visualizerIntervalRef.current);
       audioService.stop();
+      setLocalStream(null);
     }
     return () => {
       if (visualizerIntervalRef.current) clearInterval(visualizerIntervalRef.current);
@@ -435,6 +461,9 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen max-w-md mx-auto bg-industrial-bg overflow-hidden select-none">
+      {/* 내 마이크 오디오 (에코 방지를 위해 반드시 muted 처리) */}
+      <LocalAudio stream={localStream} />
+
       {/* 상대방 오디오 증폭 재생 (GainNode + Autoplay Policy 우회) */}
       {(Object.entries(remoteStreams) as [string, MediaStream][]).map(([id, stream]) => (
         <RemoteAudio key={id} stream={stream} volumeMultiplier={incomingVolume} />
