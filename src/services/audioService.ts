@@ -54,6 +54,24 @@ export const audioService = {
     return sum / this.dataArray.length;
   },
 
+  playBeep() {
+    if (!this.audioContext) return;
+    const osc = this.audioContext.createOscillator();
+    const gain = this.audioContext.createGain();
+    
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, this.audioContext.currentTime); // A5 note
+    
+    gain.gain.setValueAtTime(0.1, this.audioContext.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, this.audioContext.currentTime + 0.1);
+    
+    osc.connect(gain);
+    gain.connect(this.audioContext.destination);
+    
+    osc.start();
+    osc.stop(this.audioContext.currentTime + 0.1);
+  },
+
   stop() {
     if (this.stream) {
       this.stream.getTracks().forEach(track => track.stop());

@@ -72,6 +72,8 @@ export default function App() {
   const [noiseCancelling, setNoiseCancelling] = useState(true);
   const [activeMembers, setActiveMembers] = useState<string[]>([]);
   const [showMembersList, setShowMembersList] = useState(false);
+  const [incomingVolume, setIncomingVolume] = useState(0.8);
+  const [showVolumeControl, setShowVolumeControl] = useState(false);
   
   // 로그인 입력 상태
   const [inputName, setInputName] = useState('');
@@ -189,6 +191,7 @@ export default function App() {
             client.publish(`twclear/peer/${data.from}`, JSON.stringify({ type: 'hello', from: clientId, name: userName }));
           } else if (data.type === 'ptt-start' && data.from !== clientId) {
             setActiveSpeaker(data.name);
+            audioService.playBeep(); // 무전 시작 신호음 재생
           } else if (data.type === 'ptt-stop' && data.from !== clientId) {
             setActiveSpeaker(null);
           } else if (data.type === 'leave' && data.from !== clientId) {
@@ -353,8 +356,11 @@ export default function App() {
           autoPlay
           playsInline
           ref={(el) => {
-            if (el && el.srcObject !== stream) {
-              el.srcObject = stream;
+            if (el) {
+              if (el.srcObject !== stream) {
+                el.srcObject = stream;
+              }
+              el.volume = incomingVolume;
             }
           }}
         />
@@ -580,6 +586,39 @@ export default function App() {
 
               {/* 보조 컨트롤 */}
               <div className="absolute top-8 right-8 flex flex-col gap-4">
+                <div className="relative">
+                  <AnimatePresence>
+                    {showVolumeControl && (
+                      <motion.div
+                        initial={{ opacity: 0, x: 20 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: 20 }}
+                        className="absolute right-16 top-0 bg-industrial-card border border-white/10 p-4 rounded-2xl shadow-2xl flex items-center gap-4 w-48"
+                      >
+                        <Volume2 size={20} className="text-industrial-muted" />
+                        <input 
+                          type="range" 
+                          min="0" 
+                          max="1" 
+                          step="0.01" 
+                          value={incomingVolume}
+                          onChange={(e) => setIncomingVolume(parseFloat(e.target.value))}
+                          className="flex-1 accent-industrial-accent"
+                        />
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                  <button 
+                    onClick={() => setShowVolumeControl(!showVolumeControl)}
+                    className={cn(
+                      "p-4 rounded-2xl border transition-all",
+                      showVolumeControl ? "bg-industrial-accent text-black border-industrial-accent" : "bg-white/5 border-white/10 text-industrial-muted"
+                    )}
+                  >
+                    <Volume2 size={28} />
+                  </button>
+                </div>
+
                 <button 
                   onClick={() => setNoiseCancelling(!noiseCancelling)}
                   className={cn(
