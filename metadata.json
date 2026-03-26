@@ -1,0 +1,7 @@
+{
+  "name": "SilentConnect",
+  "description": "Mission-critical PTT walkie-talkie for industrial environments with AI noise cancellation.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

@@ -1,0 +1,73 @@
+{
+  "entities": {
+    "Channel": {
+      "title": "Channel",
+      "description": "A communication channel for PTT.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The name of the channel."
+        },
+        "members": {
+          "type": "number",
+          "description": "The number of active members in the channel."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "idle"],
+          "description": "The current status of the channel."
+        },
+        "description": {
+          "type": "string",
+          "description": "A brief description of the channel's purpose."
+        }
+      },
+      "required": ["name", "members", "status"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "A user's profile information.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "The unique identifier for the user."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "The user's display name."
+        },
+        "email": {
+          "type": "string",
+          "description": "The user's email address."
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "The user's profile photo URL."
+        },
+        "lastSeen": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The last time the user was active."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["online", "offline"],
+          "description": "The user's current online status."
+        }
+      },
+      "required": ["uid", "displayName", "email", "photoURL", "lastSeen", "status"]
+    }
+  },
+  "firestore": {
+    "/channels/{channelId}": {
+      "schema": "Channel",
+      "description": "Collection of communication channels."
+    },
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "Collection of user profiles."
+    }
+  }
+}

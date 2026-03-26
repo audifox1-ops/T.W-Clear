@@ -1,0 +1,124 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: channels
+    // Document ID: {channelId}
+    // Fields:
+    //   - name: string (required) - The name of the channel.
+    //   - members: number (required) - The number of active members in the channel.
+    //   - status: string (required, enum: ['active', 'idle']) - The current status of the channel.
+    //   - description: string (optional) - A brief description of the channel's purpose.
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required) - The unique identifier for the user.
+    //   - displayName: string (required) - The user's display name.
+    //   - email: string (required) - The user's email address.
+    //   - photoURL: string (required) - The user's profile photo URL.
+    //   - lastSeen: timestamp (required) - The last time the user was active.
+    //   - status: string (required, enum: ['online', 'offline']) - The user's current online status.
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+          (request.auth.token.email == "veersingh29199@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string &&
+        email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidUrl(url) {
+      return url is string &&
+        (url.matches("^https://.*") || url.matches("^http://.*"));
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidChannel(data) {
+      return hasRequiredFields(['name', 'members', 'status']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.members is number && data.members >= 0 &&
+             data.status in ['active', 'idle'] &&
+             (!('description' in data) || (data.description is string && data.description.size() < 500));
+    }
+
+    function isValidUser(data) {
+      return hasRequiredFields(['uid', 'displayName', 'email', 'photoURL', 'lastSeen', 'status']) &&
+             data.uid == request.auth.uid &&
+             data.displayName is string && data.displayName.size() > 0 && data.displayName.size() < 100 &&
+             isValidEmail(data.email) &&
+             isValidUrl(data.photoURL) &&
+             data.lastSeen is timestamp &&
+             data.status in ['online', 'offline'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /channels/{channelId} {
+      // Authenticated users can read channels
+      allow read: if isAuthenticated();
+      
+      // Only admins can create or delete channels
+      allow create: if isAdmin() && isValidChannel(request.resource.data);
+      allow delete: if isAdmin();
+      
+      // Update allowed for admins OR for members count updates (limited)
+      allow update: if isAuthenticated() && (
+        isAdmin() && isValidChannel(request.resource.data) ||
+        (
+          // Allow members count update
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['members']) &&
+          request.resource.data.members is number &&
+          request.resource.data.members >= 0
+        )
+      );
+    }
+
+    match /users/{userId} {
+      // Users can read any profile (for display names) but not sensitive data if it existed
+      // In this case, we only have public-ish data, but we'll still restrict it to authenticated users
+      allow read: if isAuthenticated();
+      
+      // Users can only create/update their own profile
+      allow create: if isOwner(userId) && isValidUser(request.resource.data);
+      allow update: if isOwner(userId) && isValidUser(request.resource.data);
+      
+      // Only admins can delete profiles
+      allow delete: if isAdmin();
+    }
+  }
+}
