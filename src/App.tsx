@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { motion, AnimatePresence, useMotionValue, useTransform } from 'motion/react';
 import { 
   Radio, 
@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
-import { io, Socket } from 'socket.io-client';
+import mqtt, { MqttClient } from 'mqtt';
 import { audioService } from './services/audioService';
 
 /**
@@ -77,81 +77,66 @@ export default function App() {
   const [inputName, setInputName] = useState('');
   const [inputGroup, setInputGroup] = useState(AVAILABLE_GROUPS[0]);
 
-  const socketRef = useRef<Socket | null>(null);
-  const visualizerIntervalRef = useRef<number | null>(null);
+  // WebRTC 및 MQTT 상태
+  const clientId = useMemo(() => Math.random().toString(36).substring(2, 15), []);
+  const mqttClientRef = useRef<MqttClient | null>(null);
   const peerConnections = useRef<Record<string, RTCPeerConnection>>({});
+  const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  const visualizerIntervalRef = useRef<number | null>(null);
 
-  // 소켓 및 WebRTC 초기화
-  const initializeNetwork = useCallback((userName: string, userGroup: string) => {
-    if (socketRef.current) {
-      socketRef.current.disconnect();
+  // 사용자 퇴장 처리
+  const handleUserLeft = useCallback((userId: string) => {
+    setActiveMembers(prev => prev.filter(id => id !== userId));
+    setRemoteStreams(prev => {
+      const newStreams = { ...prev };
+      delete newStreams[userId];
+      return newStreams;
+    });
+    if (peerConnections.current[userId]) {
+      peerConnections.current[userId].close();
+      delete peerConnections.current[userId];
     }
-    
-    socketRef.current = io();
-    socketRef.current.emit('join-channel', userGroup);
-
-    socketRef.current.on('ptt-start', ({ from }) => {
-      setActiveSpeaker(from);
-    });
-
-    socketRef.current.on('ptt-stop', () => {
-      setActiveSpeaker(null);
-    });
-
-    socketRef.current.on('user-joined', (userId) => {
-      setActiveMembers(prev => [...new Set([...prev, userId])]);
-      createPeerConnection(userId);
-    });
-
-    socketRef.current.on('channel-members', (members: string[]) => {
-      setActiveMembers(members);
-      members.forEach(id => createPeerConnection(id));
-    });
-
-    socketRef.current.on('offer', async ({ from, offer }) => {
-      const pc = await createPeerConnection(from);
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      socketRef.current?.emit('answer', { target: from, answer });
-    });
-
-    socketRef.current.on('answer', async ({ from, answer }) => {
-      const pc = peerConnections.current[from];
-      if (pc) await pc.setRemoteDescription(new RTCSessionDescription(answer));
-    });
-
-    socketRef.current.on('ice-candidate', async ({ from, candidate }) => {
-      const pc = peerConnections.current[from];
-      if (pc) await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    });
-
-    socketRef.current.on('user-left', (userId) => {
-      setActiveMembers(prev => prev.filter(id => id !== userId));
-      if (peerConnections.current[userId]) {
-        peerConnections.current[userId].close();
-        delete peerConnections.current[userId];
-      }
-    });
   }, []);
 
-  const createPeerConnection = async (userId: string) => {
-    if (peerConnections.current[userId]) return peerConnections.current[userId];
+  // WebRTC PeerConnection 생성
+  const createPeerConnection = useCallback(async (targetId: string, isInitiator: boolean, channelTopic: string) => {
+    if (peerConnections.current[targetId]) return peerConnections.current[targetId];
 
+    // 구글 공개 STUN 서버 추가 (다양한 네트워크 환경 지원)
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' }
+      ]
     });
 
+    peerConnections.current[targetId] = pc;
+
     pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socketRef.current?.emit('ice-candidate', { target: userId, candidate: event.candidate });
+      if (event.candidate && mqttClientRef.current) {
+        mqttClientRef.current.publish(`twclear/peer/${targetId}`, JSON.stringify({
+          type: 'ice-candidate',
+          from: clientId,
+          candidate: event.candidate
+        }));
       }
     };
 
     pc.ontrack = (event) => {
-      const audio = new Audio();
-      audio.srcObject = event.streams[0];
-      audio.play();
+      // 상대방의 오디오 스트림 수신
+      setRemoteStreams(prev => ({
+        ...prev,
+        [targetId]: event.streams[0]
+      }));
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'closed') {
+        handleUserLeft(targetId);
+      }
     };
 
     const localStream = audioService.getStream();
@@ -159,13 +144,87 @@ export default function App() {
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
     }
 
-    peerConnections.current[userId] = pc;
-    const offer = await pc.createOffer();
-    await pc.setLocalDescription(offer);
-    socketRef.current?.emit('offer', { target: userId, offer });
+    if (isInitiator) {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      mqttClientRef.current?.publish(`twclear/peer/${targetId}`, JSON.stringify({
+        type: 'offer',
+        from: clientId,
+        offer
+      }));
+    }
 
     return pc;
-  };
+  }, [clientId, handleUserLeft]);
+
+  // 소켓 및 WebRTC 초기화 (MQTT를 이용한 Serverless Signaling)
+  const initializeNetwork = useCallback((userName: string, userGroup: string) => {
+    if (mqttClientRef.current) {
+      mqttClientRef.current.end();
+    }
+    
+    // 퍼블릭 MQTT 브로커를 통한 시그널링 (별도 백엔드 불필요)
+    const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
+    mqttClientRef.current = client;
+
+    const channelTopic = `twclear/channel/${userGroup}`;
+    const peerTopic = `twclear/peer/${clientId}`;
+
+    client.on('connect', () => {
+      client.subscribe([channelTopic, peerTopic]);
+      // 채널 입장 알림
+      client.publish(channelTopic, JSON.stringify({ type: 'join', from: clientId, name: userName }));
+    });
+
+    client.on('message', async (topic, message) => {
+      try {
+        const data = JSON.parse(message.toString());
+        
+        if (topic === channelTopic) {
+          if (data.type === 'join' && data.from !== clientId) {
+            // 새로운 사용자가 들어오면 내가 Initiator가 되어 연결 시도
+            setActiveMembers(prev => [...new Set([...prev, data.from])]);
+            await createPeerConnection(data.from, true, channelTopic);
+            // 나도 채널에 있다고 알려줌
+            client.publish(`twclear/peer/${data.from}`, JSON.stringify({ type: 'hello', from: clientId, name: userName }));
+          } else if (data.type === 'ptt-start' && data.from !== clientId) {
+            setActiveSpeaker(data.name);
+          } else if (data.type === 'ptt-stop' && data.from !== clientId) {
+            setActiveSpeaker(null);
+          } else if (data.type === 'leave' && data.from !== clientId) {
+            handleUserLeft(data.from);
+          }
+        } else if (topic === peerTopic) {
+          if (data.type === 'hello') {
+            setActiveMembers(prev => [...new Set([...prev, data.from])]);
+          } else if (data.type === 'offer') {
+            setActiveMembers(prev => [...new Set([...prev, data.from])]);
+            const pc = await createPeerConnection(data.from, false, channelTopic);
+            await pc.setRemoteDescription(new RTCSessionDescription(data.offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            client.publish(`twclear/peer/${data.from}`, JSON.stringify({
+              type: 'answer',
+              from: clientId,
+              answer
+            }));
+          } else if (data.type === 'answer') {
+            const pc = peerConnections.current[data.from];
+            if (pc) {
+              await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+            }
+          } else if (data.type === 'ice-candidate') {
+            const pc = peerConnections.current[data.from];
+            if (pc) {
+              await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
+            }
+          }
+        }
+      } catch (err) {
+        console.error('MQTT message error:', err);
+      }
+    });
+  }, [clientId, createPeerConnection, handleUserLeft]);
 
   // 오디오 서비스 관리
   useEffect(() => {
@@ -182,13 +241,20 @@ export default function App() {
     return () => {
       if (visualizerIntervalRef.current) clearInterval(visualizerIntervalRef.current);
       audioService.stop();
+      if (mqttClientRef.current && profile) {
+        mqttClientRef.current.publish(`twclear/channel/${profile.group}`, JSON.stringify({ type: 'leave', from: clientId }));
+        mqttClientRef.current.end();
+      }
     };
-  }, [view]);
+  }, [view, clientId, profile]);
 
   // 접속 핸들러
-  const handleJoin = (e: React.FormEvent) => {
+  const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputName || !inputGroup) return;
+
+    // 브라우저 오디오 권한을 얻기 위해 먼저 초기화
+    await audioService.initialize();
 
     const newProfile = { name: inputName, group: inputGroup };
     setProfile(newProfile);
@@ -202,6 +268,11 @@ export default function App() {
   const switchGroup = (direction: 'next' | 'prev') => {
     if (!profile) return;
     
+    // 기존 채널에서 퇴장 알림
+    if (mqttClientRef.current) {
+      mqttClientRef.current.publish(`twclear/channel/${profile.group}`, JSON.stringify({ type: 'leave', from: clientId }));
+    }
+
     const currentIndex = AVAILABLE_GROUPS.indexOf(profile.group);
     let nextIndex;
     
@@ -217,6 +288,7 @@ export default function App() {
     setProfile(newProfile);
     setActiveMembers([]);
     setActiveSpeaker(null);
+    setRemoteStreams({});
     
     // 기존 피어 연결 종료
     (Object.values(peerConnections.current) as RTCPeerConnection[]).forEach(pc => pc.close());
@@ -228,26 +300,38 @@ export default function App() {
   };
 
   // 무전 시작/종료
-  const handlePTTStart = useCallback(async () => {
+  const handlePTTStart = useCallback(() => {
     if (activeSpeaker) return;
     try {
-      await audioService.initialize();
+      audioService.setTalking(true);
       setIsTalking(true);
-      socketRef.current?.emit('ptt-start');
+      if (mqttClientRef.current && profile) {
+        mqttClientRef.current.publish(`twclear/channel/${profile.group}`, JSON.stringify({ 
+          type: 'ptt-start', 
+          from: clientId, 
+          name: profile.name 
+        }));
+      }
       if ('vibrate' in navigator) navigator.vibrate(80);
     } catch (err) {
       console.error('PTT 시작 실패:', err);
     }
-  }, [activeSpeaker]);
+  }, [activeSpeaker, clientId, profile]);
 
   const handlePTTEnd = useCallback(() => {
     if (!isTalking) return;
+    audioService.setTalking(false);
     setIsTalking(false);
-    socketRef.current?.emit('ptt-stop');
+    if (mqttClientRef.current && profile) {
+      mqttClientRef.current.publish(`twclear/channel/${profile.group}`, JSON.stringify({ 
+        type: 'ptt-stop', 
+        from: clientId 
+      }));
+    }
     if ('vibrate' in navigator) navigator.vibrate([40, 40]);
-  }, [isTalking]);
+  }, [isTalking, clientId, profile]);
 
-  // --- 뷰 렌더링 로직 (컴포넌트 내부 정의 피함) ---
+  // --- 뷰 렌더링 로직 ---
 
   const dragX = useMotionValue(0);
   const opacity = useTransform(dragX, [-100, 0, 100], [0, 1, 0]);
@@ -262,6 +346,20 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen max-w-md mx-auto bg-industrial-bg overflow-hidden select-none">
+      {/* 상대방 오디오 스트림 재생 (Autoplay Policy 우회) */}
+      {Object.entries(remoteStreams).map(([id, stream]) => (
+        <audio
+          key={id}
+          autoPlay
+          playsInline
+          ref={(el) => {
+            if (el && el.srcObject !== stream) {
+              el.srcObject = stream;
+            }
+          }}
+        />
+      ))}
+
       <AnimatePresence mode="wait">
         {view === 'AUTH' ? (
           <motion.div 

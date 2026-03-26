@@ -1,90 +1,67 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
-export class AudioService {
-  private audioContext: AudioContext | null = null;
-  private mediaStream: MediaStream | null = null;
-  private sourceNode: MediaStreamAudioSourceNode | null = null;
-  private analyserNode: AnalyserNode | null = null;
-  private noiseFilterNode: BiquadFilterNode | null = null;
-  private gainNode: GainNode | null = null;
-  private isNoiseCancelling: boolean = true;
+export const audioService = {
+  stream: null as MediaStream | null,
+  audioContext: null as AudioContext | null,
+  analyser: null as AnalyserNode | null,
+  dataArray: null as Uint8Array | null,
 
   async initialize() {
-    if (this.audioContext) return;
-
+    if (this.stream) return;
     try {
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({ 
+      this.stream = await navigator.mediaDevices.getUserMedia({ 
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
-          autoGainControl: true
+          autoGainControl: true,
         } 
       });
       
-      this.audioContext = new AudioContext();
-      this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
-      
-      // 1. Noise Filter (High-pass to remove low-end rumble)
-      this.noiseFilterNode = this.audioContext.createBiquadFilter();
-      this.noiseFilterNode.type = 'highpass';
-      this.noiseFilterNode.frequency.value = 150;
+      // Mute by default (PTT behavior)
+      this.stream.getAudioTracks().forEach(track => {
+        track.enabled = false;
+      });
 
-      // 2. Gain Node for volume control
-      this.gainNode = this.audioContext.createGain();
-
-      // 3. Analyser for visualization
-      this.analyserNode = this.audioContext.createAnalyser();
-      this.analyserNode.fftSize = 256;
-
-      // Connect nodes
-      this.sourceNode.connect(this.noiseFilterNode);
-      this.noiseFilterNode.connect(this.gainNode);
-      this.gainNode.connect(this.analyserNode);
-      
-      this.updateFilterState();
-    } catch (error) {
-      console.error('Failed to initialize audio service:', error);
-      throw error;
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const source = this.audioContext.createMediaStreamSource(this.stream);
+      this.analyser = this.audioContext.createAnalyser();
+      this.analyser.fftSize = 256;
+      source.connect(this.analyser);
+      this.dataArray = new Uint8Array(this.analyser.frequencyBinCount);
+    } catch (err) {
+      console.error('Failed to initialize audio:', err);
+      throw err;
     }
-  }
+  },
 
-  setNoiseCancelling(enabled: boolean) {
-    this.isNoiseCancelling = enabled;
-    this.updateFilterState();
-  }
+  getStream() {
+    return this.stream;
+  },
 
-  private updateFilterState() {
-    if (!this.noiseFilterNode) return;
-    // When disabled, we set frequency to very low to effectively bypass
-    this.noiseFilterNode.frequency.value = this.isNoiseCancelling ? 150 : 20;
-  }
+  setTalking(isTalking: boolean) {
+    if (this.stream) {
+      this.stream.getAudioTracks().forEach(track => {
+        track.enabled = isTalking;
+      });
+    }
+  },
 
-  getAnalyserData(): Uint8Array {
-    if (!this.analyserNode) return new Uint8Array(0);
-    const dataArray = new Uint8Array(this.analyserNode.frequencyBinCount);
-    this.analyserNode.getByteFrequencyData(dataArray);
-    return dataArray;
-  }
-
-  getVolume(): number {
-    const data = this.getAnalyserData();
-    if (data.length === 0) return 0;
-    const sum = data.reduce((a, b) => a + b, 0);
-    return sum / data.length;
-  }
-
-  getStream(): MediaStream | null {
-    return this.mediaStream;
-  }
+  getVolume() {
+    if (!this.analyser || !this.dataArray) return 0;
+    this.analyser.getByteFrequencyData(this.dataArray);
+    let sum = 0;
+    for (let i = 0; i < this.dataArray.length; i++) {
+      sum += this.dataArray[i];
+    }
+    return sum / this.dataArray.length;
+  },
 
   stop() {
-    this.mediaStream?.getTracks().forEach(track => track.stop());
-    this.audioContext?.close();
-    this.audioContext = null;
+    if (this.stream) {
+      this.stream.getTracks().forEach(track => track.stop());
+      this.stream = null;
+    }
+    if (this.audioContext) {
+      this.audioContext.close();
+      this.audioContext = null;
+    }
   }
-}
-
-export const audioService = new AudioService();
+};
