@@ -1,6 +1,6 @@
 {
   "name": "T.W CLEAR",
-  "description": "Mission-critical PTT walkie-talkie for industrial environments with AI noise cancellation.",
+  "description": "산업 현장을 위한 고성능 무전기 애플리케이션 T.W CLEAR",
   "requestFramePermissions": [
     "microphone"
   ]
