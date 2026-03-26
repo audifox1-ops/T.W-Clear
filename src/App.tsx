@@ -284,6 +284,21 @@ export default function App() {
   const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
   const visualizerIntervalRef = useRef<number | null>(null);
 
+  // 로컬 스트림이 준비되면 모든 기존 피어 연결에 트랙 추가
+  useEffect(() => {
+    if (localStream) {
+      (Object.values(peerConnections.current) as RTCPeerConnection[]).forEach(pc => {
+        const senders = pc.getSenders();
+        localStream.getTracks().forEach(track => {
+          const alreadyAdded = senders.some(s => s.track === track);
+          if (!alreadyAdded) {
+            pc.addTrack(track, localStream);
+          }
+        });
+      });
+    }
+  }, [localStream]);
+
   // 사용자 퇴장 처리
   const handleUserLeft = useCallback((userId: string) => {
     setActiveMembers(prev => prev.filter(id => id !== userId));
@@ -339,7 +354,13 @@ export default function App() {
 
     const stream = audioService.getStream();
     if (stream) {
-      stream.getTracks().forEach(track => pc.addTrack(track, stream));
+      const senders = pc.getSenders();
+      stream.getTracks().forEach(track => {
+        const alreadyAdded = senders.some(s => s.track === track);
+        if (!alreadyAdded) {
+          pc.addTrack(track, stream);
+        }
+      });
     }
 
     if (isInitiator) {
@@ -536,8 +557,13 @@ export default function App() {
 
   // 무전 시작/종료
   const handlePTTStart = useCallback(() => {
-    if (activeSpeaker) return;
+    if (activeSpeaker || !localStream) return;
     try {
+      // 마이크 트랙 직접 활성화 (enabled = true)
+      localStream.getAudioTracks().forEach(track => {
+        track.enabled = true;
+      });
+      
       audioService.setTalking(true);
       setIsTalking(true);
       if (mqttClientRef.current && profile) {
@@ -551,10 +577,16 @@ export default function App() {
     } catch (err) {
       console.error('PTT 시작 실패:', err);
     }
-  }, [activeSpeaker, clientId, profile]);
+  }, [activeSpeaker, clientId, profile, localStream]);
 
   const handlePTTEnd = useCallback(() => {
-    if (!isTalking) return;
+    if (!isTalking || !localStream) return;
+    
+    // 마이크 트랙 직접 비활성화 (enabled = false)
+    localStream.getAudioTracks().forEach(track => {
+      track.enabled = false;
+    });
+
     audioService.setTalking(false);
     setIsTalking(false);
     if (mqttClientRef.current && profile) {
@@ -564,7 +596,7 @@ export default function App() {
       }));
     }
     if ('vibrate' in navigator) navigator.vibrate([40, 40]);
-  }, [isTalking, clientId, profile]);
+  }, [isTalking, clientId, profile, localStream]);
 
   // --- 뷰 렌더링 로직 ---
 
