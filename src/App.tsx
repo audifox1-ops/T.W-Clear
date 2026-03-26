@@ -4,7 +4,7 @@
  */
 
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence, useMotionValue, useTransform } from 'motion/react';
 import { 
   Radio, 
   Mic, 
@@ -22,7 +22,8 @@ import {
   Lock,
   User as UserIcon,
   LogOut,
-  Activity
+  Activity,
+  ChevronLeft
 } from 'lucide-react';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -82,16 +83,16 @@ const MOCK_CHANNELS: Channel[] = [
 
 // --- Components ---
 
-const AudioVisualizer = ({ isActive, color = '#FF4444', volume = 0 }: { isActive: boolean, color?: string, volume?: number }) => {
+const AudioVisualizer = ({ isActive, color = '#3A3F47', volume = 0 }: { isActive: boolean, color?: string, volume?: number }) => {
   return (
-    <div className="flex items-center gap-1 h-8">
-      {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+    <div className="flex items-center gap-1.5 h-12">
+      {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((i) => (
         <motion.div
           key={i}
-          animate={isActive ? { height: [4, (volume / 2) + (Math.random() * 10) + 4, 4] } : { height: 4 }}
-          transition={{ repeat: Infinity, duration: 0.2, delay: i * 0.02 }}
+          animate={isActive ? { height: [8, (volume / 1.5) + (Math.random() * 20) + 8, 8] } : { height: 8 }}
+          transition={{ repeat: Infinity, duration: 0.15, delay: i * 0.01 }}
           style={{ backgroundColor: color }}
-          className="w-1 rounded-full opacity-80"
+          className="w-1.5 rounded-full opacity-90"
         />
       ))}
     </div>
@@ -103,12 +104,14 @@ export default function App() {
   const [user, setUser] = useState<FirebaseUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [isTalking, setIsTalking] = useState(false);
+  const [isVoiceDetected, setIsVoiceDetected] = useState(false);
   const [activeChannel, setActiveChannel] = useState<Channel | null>(null);
   const [noiseCancelling, setNoiseCancelling] = useState(true);
   const [activeSpeaker, setActiveSpeaker] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [volume, setVolume] = useState(0);
   const [channels, setChannels] = useState<Channel[]>(MOCK_CHANNELS);
+  const [loginError, setLoginError] = useState<string | null>(null);
   
   const socketRef = useRef<Socket | null>(null);
   const visualizerIntervalRef = useRef<number | null>(null);
@@ -177,7 +180,7 @@ export default function App() {
     socketRef.current = io();
 
     socketRef.current.on('ptt-start', ({ from }) => {
-      setActiveSpeaker(`Remote User (${from.slice(0, 4)})`);
+      setActiveSpeaker(`USER_${from.slice(0, 4)}`);
     });
 
     socketRef.current.on('ptt-stop', () => {
@@ -185,7 +188,6 @@ export default function App() {
     });
 
     socketRef.current.on('user-joined', async (userId) => {
-      console.log('User joined:', userId);
       await createPeerConnection(userId);
     });
 
@@ -244,17 +246,13 @@ export default function App() {
     };
 
     pc.ontrack = (event) => {
-      console.log('Received remote track from:', userId);
       const stream = event.streams[0];
       remoteStreams.current[userId] = stream;
-      
-      // Play remote stream
       const audio = new Audio();
       audio.srcObject = stream;
       audio.play();
     };
 
-    // Add local stream if available
     const localStream = audioService.getStream();
     if (localStream) {
       localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
@@ -262,7 +260,6 @@ export default function App() {
 
     peerConnections.current[userId] = pc;
 
-    // If we are the one initiating, create offer
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
     socketRef.current?.emit('offer', { target: userId, offer });
@@ -275,7 +272,9 @@ export default function App() {
     if (view === 'PTT') {
       audioService.initialize().then(() => {
         visualizerIntervalRef.current = window.setInterval(() => {
-          setVolume(audioService.getVolume());
+          const currentVolume = audioService.getVolume();
+          setVolume(currentVolume);
+          setIsVoiceDetected(currentVolume > 15);
         }, 50);
       });
     } else {
@@ -303,14 +302,12 @@ export default function App() {
       await audioService.initialize();
       setIsTalking(true);
       
-      // Haptic feedback
       if ('vibrate' in navigator) {
-        navigator.vibrate(50);
+        navigator.vibrate(80);
       }
 
       socketRef.current?.emit('ptt-start');
       
-      // Add local stream to all peer connections
       const localStream = audioService.getStream();
       if (localStream) {
         Object.values(peerConnections.current).forEach(pc => {
@@ -336,19 +333,24 @@ export default function App() {
     setIsTalking(false);
     socketRef.current?.emit('ptt-stop');
     
-    // Haptic feedback
     if ('vibrate' in navigator) {
-      navigator.vibrate([30, 30]);
+      navigator.vibrate([40, 40]);
     }
   }, [isTalking]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+    setLoginError(null);
     try {
       const provider = new GoogleAuthProvider();
       await signInWithPopup(auth, provider);
-    } catch (error) {
-      console.error('Login Error:', error);
+    } catch (error: any) {
+      if (error.code === 'auth/popup-closed-by-user') {
+        setLoginError('Login cancelled. Please try again.');
+      } else {
+        console.error('Login Error:', error);
+        setLoginError('An unexpected error occurred during login.');
+      }
     }
   };
 
@@ -367,6 +369,18 @@ export default function App() {
     setView('PTT');
   };
 
+  const nextChannel = () => {
+    const currentIndex = channels.findIndex(c => c.id === activeChannel?.id);
+    const nextIndex = (currentIndex + 1) % channels.length;
+    selectChannel(channels[nextIndex]);
+  };
+
+  const prevChannel = () => {
+    const currentIndex = channels.findIndex(c => c.id === activeChannel?.id);
+    const prevIndex = (currentIndex - 1 + channels.length) % channels.length;
+    selectChannel(channels[prevIndex]);
+  };
+
   // --- Views ---
 
   const AuthView = () => (
@@ -374,38 +388,40 @@ export default function App() {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="flex flex-col h-full px-8 justify-center"
+      className="flex flex-col h-full px-10 justify-center bg-industrial-bg"
     >
-      <div className="mb-12 text-center">
-        <div className="w-20 h-20 bg-industrial-accent rounded-3xl mx-auto flex items-center justify-center mb-6 shadow-2xl">
-          <Radio size={40} className="text-white" />
+      <div className="mb-16 text-center">
+        <div className="w-24 h-24 bg-industrial-accent rounded-[32px] mx-auto flex items-center justify-center mb-8 shadow-[0_0_50px_rgba(255,215,0,0.2)] rugged-border">
+          <Radio size={48} className="text-black" />
         </div>
-        <h1 className="text-3xl font-bold tracking-tighter text-white mb-2">SilentConnect</h1>
-        <p className="text-industrial-muted text-sm font-mono tracking-widest uppercase">Industrial Mission-Critical PTT</p>
+        <h1 className="text-4xl font-extrabold tracking-tighter text-white mb-3">SILENT CONNECT</h1>
+        <p className="status-label">Industrial Mission-Critical PTT</p>
       </div>
 
-      <div className="space-y-6">
-        <div className="bg-industrial-card border border-white/5 p-6 rounded-2xl text-center">
-          <ShieldCheck className="mx-auto text-industrial-safe mb-4" size={32} />
-          <h2 className="text-white font-bold mb-2">Secure Access Protocol</h2>
-          <p className="text-industrial-muted text-xs">Please authenticate using your corporate credentials to access the communication network.</p>
+      <div className="space-y-8">
+        <div className="bg-industrial-card border border-white/5 p-8 rounded-3xl text-center rugged-border">
+          <ShieldCheck className="mx-auto text-industrial-transmitting mb-4" size={40} />
+          <h2 className="text-white font-bold text-lg mb-2 uppercase tracking-tight">Secure Access Protocol</h2>
+          <p className="text-industrial-muted text-sm leading-relaxed">Authenticate with corporate credentials to access the secure communication network.</p>
         </div>
 
         <button 
           onClick={handleLogin}
-          className="w-full bg-white text-black font-bold py-5 rounded-2xl shadow-xl hover:brightness-110 active:scale-[0.98] transition-all flex items-center justify-center gap-3"
+          className="w-full bg-industrial-accent text-black font-black py-6 rounded-3xl shadow-2xl hover:brightness-110 active:scale-[0.97] transition-all flex items-center justify-center gap-4 text-lg tracking-tighter"
         >
-          <LogIn size={20} />
+          <LogIn size={24} />
           <span>SIGN IN WITH GOOGLE</span>
         </button>
-      </div>
 
-      <div className="mt-12 text-center">
-        <span className="status-label block mb-4">System Status: Operational</span>
-        <div className="flex justify-center gap-4">
-          <Activity size={24} className="text-industrial-safe opacity-50" />
-          <Zap size={24} className="text-industrial-accent opacity-50" />
-        </div>
+        {loginError && (
+          <motion.div 
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="text-industrial-accent text-xs font-mono text-center bg-industrial-accent/10 p-4 rounded-2xl border border-industrial-accent/20"
+          >
+            {loginError}
+          </motion.div>
+        )}
       </div>
     </motion.div>
   );
@@ -415,237 +431,296 @@ export default function App() {
       initial={{ opacity: 0, x: 20 }}
       animate={{ opacity: 1, x: 0 }}
       exit={{ opacity: 0, x: -20 }}
-      className="flex flex-col h-full"
+      className="flex flex-col h-full bg-industrial-bg"
     >
-      <header className="p-6 border-b border-white/5 flex items-center justify-between">
+      <header className="p-8 border-b border-white/5 flex items-center justify-between">
         <div>
-          <h2 className="text-xl font-bold text-white tracking-tight">Channels</h2>
-          <p className="text-industrial-muted text-xs font-mono uppercase tracking-widest">Active Network</p>
+          <h2 className="text-2xl font-black text-white tracking-tighter uppercase">Channels</h2>
+          <p className="status-label">Active Network</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-4">
           {profile?.photoURL && (
-            <img src={profile.photoURL} alt="User" className="w-8 h-8 rounded-full border border-white/10" />
+            <img src={profile.photoURL} alt="User" className="w-10 h-10 rounded-2xl border border-white/10" />
           )}
-          <button onClick={handleLogout} className="p-2 text-industrial-muted hover:text-white transition-colors">
-            <LogOut size={20} />
+          <button onClick={handleLogout} className="p-3 bg-white/5 rounded-2xl text-industrial-muted hover:text-white transition-colors">
+            <LogOut size={24} />
           </button>
         </div>
       </header>
 
-      <div className="p-6">
+      <div className="p-8">
         <div className="relative">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-industrial-muted" size={18} />
+          <Search className="absolute left-5 top-1/2 -translate-y-1/2 text-industrial-muted" size={24} />
           <input 
             type="text" 
-            placeholder="Search channels..."
+            placeholder="SEARCH CHANNELS..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="w-full bg-industrial-card border border-white/10 rounded-2xl py-4 pl-12 pr-4 text-white placeholder:text-industrial-muted focus:outline-none focus:border-industrial-accent transition-colors"
+            className="w-full bg-industrial-card border border-white/10 rounded-3xl py-6 pl-14 pr-6 text-white font-bold placeholder:text-industrial-muted focus:outline-none focus:border-industrial-accent transition-colors text-lg"
           />
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 pb-6 space-y-3">
+      <div className="flex-1 overflow-y-auto px-8 pb-8 space-y-4">
         {channels.filter(c => c.name.toLowerCase().includes(searchQuery.toLowerCase())).map((channel) => (
           <button
             key={channel.id}
             onClick={() => selectChannel(channel)}
-            className="w-full bg-industrial-card border border-white/5 p-5 rounded-2xl flex items-center justify-between hover:border-industrial-accent/50 transition-all group active:scale-[0.99]"
+            className="w-full bg-industrial-card border border-white/5 p-6 rounded-[32px] flex items-center justify-between hover:border-industrial-accent/50 transition-all group active:scale-[0.98] rugged-border"
           >
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-5">
               <div className={cn(
-                "w-12 h-12 rounded-xl flex items-center justify-center transition-colors",
-                channel.status === 'active' ? "bg-industrial-accent/20 text-industrial-accent" : "bg-white/5 text-industrial-muted"
+                "w-16 h-16 rounded-2xl flex items-center justify-center transition-colors",
+                channel.status === 'active' ? "bg-industrial-transmitting/20 text-industrial-transmitting" : "bg-white/5 text-industrial-muted"
               )}>
-                <Radio size={24} />
+                <Radio size={32} />
               </div>
               <div className="text-left">
-                <h3 className="text-white font-bold tracking-tight">{channel.name}</h3>
-                <div className="flex items-center gap-2 mt-1">
-                  <Users size={12} className="text-industrial-muted" />
-                  <span className="text-industrial-muted text-xs font-mono">{channel.members} ONLINE</span>
+                <h3 className="text-xl font-black text-white tracking-tighter uppercase">{channel.name}</h3>
+                <div className="flex items-center gap-3 mt-1">
+                  <Users size={16} className="text-industrial-muted" />
+                  <span className="data-value text-industrial-muted uppercase">{channel.members} ONLINE</span>
                   {channel.status === 'active' && (
-                    <span className="flex h-1.5 w-1.5 rounded-full bg-industrial-accent animate-pulse" />
+                    <span className="flex h-2 w-2 rounded-full bg-industrial-transmitting animate-pulse" />
                   )}
                 </div>
               </div>
             </div>
-            <ChevronRight size={20} className="text-industrial-muted group-hover:text-white transition-colors" />
+            <ChevronRight size={28} className="text-industrial-muted group-hover:text-white transition-colors" />
           </button>
         ))}
       </div>
     </motion.div>
   );
 
-  const PTTView = () => (
-    <motion.div 
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      exit={{ opacity: 0, scale: 1.05 }}
-      className="flex flex-col h-full"
-    >
-      {/* Top Header - Status Bar */}
-      <header className="px-6 py-4 flex items-center justify-between border-b border-white/5 bg-industrial-card/50 backdrop-blur-md">
-        <button onClick={() => setView('CHANNELS')} className="p-2 -ml-2 text-industrial-muted hover:text-white transition-colors">
-          <ArrowLeft size={20} />
-        </button>
-        <div className="flex flex-col items-center">
-          <span className="status-label">System Status</span>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-industrial-safe animate-pulse" />
-            <span className="data-value text-industrial-safe uppercase">Connected</span>
+  const PTTView = () => {
+    const x = useMotionValue(0);
+    const opacity = useTransform(x, [-100, 0, 100], [0, 1, 0]);
+
+    const handleDragEnd = (event: any, info: any) => {
+      if (info.offset.x > 100) {
+        prevChannel();
+      } else if (info.offset.x < -100) {
+        nextChannel();
+      }
+    };
+
+    return (
+      <motion.div 
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="flex flex-col h-full bg-industrial-bg relative"
+      >
+        {/* Top Header - Massive Glanceability */}
+        <header className="px-8 pt-12 pb-8 flex flex-col items-center border-b border-white/5 bg-industrial-card/30 backdrop-blur-2xl">
+          <div className="w-full flex items-center justify-between mb-6">
+            <button onClick={() => setView('CHANNELS')} className="p-4 -ml-4 bg-white/5 rounded-2xl text-industrial-muted hover:text-white transition-colors">
+              <ChevronLeft size={32} />
+            </button>
+            <div className="flex items-center gap-6">
+              <div className="flex flex-col items-end">
+                <span className="status-label">SIGNAL</span>
+                <div className="flex gap-1 mt-1.5">
+                  {[1, 2, 3, 4].map((i) => (
+                    <div key={i} className={cn("w-1.5 rounded-full", i <= 3 ? "bg-industrial-transmitting h-4" : "bg-white/10 h-4")} />
+                  ))}
+                </div>
+              </div>
+              <div className="flex flex-col items-end">
+                <span className="status-label">BATTERY</span>
+                <div className="flex items-center gap-2 mt-1">
+                  <span className="data-value text-industrial-transmitting">84%</span>
+                  <Battery size={20} className="text-industrial-transmitting rotate-90" />
+                </div>
+              </div>
+            </div>
           </div>
-        </div>
-        <div className="flex items-center gap-4 text-industrial-muted">
-          <Wifi size={14} />
-          <Battery size={14} />
-        </div>
-      </header>
 
-      {/* Channel Info */}
-      <section className="px-6 py-8 flex flex-col items-center text-center">
-        <div className="flex items-center gap-2 mb-2">
-          <Radio size={18} className="text-industrial-muted" />
-          <span className="status-label">Active Channel</span>
-        </div>
-        <h1 className="text-2xl font-bold tracking-tight text-white mb-1">
-          {activeChannel?.name || 'SELECT CHANNEL'}
-        </h1>
-        <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/5 border border-white/10">
-          <Users size={12} className="text-industrial-muted" />
-          <span className="data-value text-industrial-muted">{activeChannel?.members || 0} Members Active</span>
-        </div>
-      </section>
+          <motion.div 
+            style={{ x, opacity }}
+            drag="x"
+            dragConstraints={{ left: 0, right: 0 }}
+            onDragEnd={handleDragEnd}
+            className="w-full flex flex-col items-center cursor-grab active:cursor-grabbing"
+          >
+            <div className="flex items-center gap-3 mb-2">
+              <Radio size={24} className="text-industrial-accent" />
+              <span className="status-label text-industrial-accent">ACTIVE CHANNEL</span>
+            </div>
+            <h1 className="text-4xl font-black tracking-tighter text-white uppercase text-center leading-none">
+              {activeChannel?.name || 'NO CHANNEL'}
+            </h1>
+            <div className="flex items-center gap-3 mt-4 px-5 py-2 rounded-2xl bg-white/5 border border-white/10">
+              <Users size={18} className="text-industrial-muted" />
+              <span className="data-value text-industrial-muted uppercase">{activeChannel?.members || 0} MEMBERS IN NETWORK</span>
+            </div>
+          </motion.div>
+          
+          <div className="flex justify-between w-full mt-6 px-4">
+            <ChevronLeft size={24} className="text-industrial-muted/30 animate-pulse" />
+            <span className="status-label opacity-30">SWIPE TO SWITCH</span>
+            <ChevronRight size={24} className="text-industrial-muted/30 animate-pulse" />
+          </div>
+        </header>
 
-      {/* Main PTT Area */}
-      <main className="flex-1 flex flex-col items-center justify-center relative px-6">
-        {/* Background Radial Tracks */}
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-20">
-          <div className="w-64 h-64 radial-track" />
-          <div className="absolute w-80 h-80 radial-track opacity-50" />
-        </div>
-
-        {/* Status Indicator */}
-        <div className="absolute top-10 w-full flex flex-col items-center">
-          <AnimatePresence mode="wait">
-            {isTalking ? (
-              <motion.div
-                key="talking"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="flex flex-col items-center"
-              >
-                <span className="status-label text-industrial-accent">Transmitting</span>
-                <div className="mt-2">
-                  <AudioVisualizer isActive={true} color="#FF4444" volume={volume} />
-                </div>
-              </motion.div>
-            ) : activeSpeaker ? (
-              <motion.div
-                key="receiving"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -10 }}
-                className="flex flex-col items-center"
-              >
-                <span className="status-label text-industrial-safe">Receiving</span>
-                <span className="data-value text-white mt-1">{activeSpeaker}</span>
-                <div className="mt-2">
-                  <AudioVisualizer isActive={true} color="#00FF00" volume={40} />
-                </div>
-              </motion.div>
-            ) : (
-              <motion.div
-                key="idle"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                className="flex flex-col items-center"
-              >
-                <span className="status-label">Standby Mode</span>
-                <div className="mt-2">
-                  <AudioVisualizer isActive={false} />
-                </div>
-              </motion.div>
+        {/* Status Feedback Area */}
+        <main className="flex-1 flex flex-col items-center justify-center relative overflow-hidden">
+          {/* Dynamic Background Effects */}
+          <AnimatePresence>
+            {isTalking && (
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 0.15, scale: 1.5 }}
+                exit={{ opacity: 0 }}
+                className="absolute inset-0 bg-industrial-transmitting rounded-full blur-[120px]"
+              />
+            )}
+            {activeSpeaker && (
+              <motion.div 
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 0.15, scale: 1.5 }}
+                exit={{ opacity: 0 }}
+                className="absolute inset-0 bg-industrial-receiving rounded-full blur-[120px]"
+              />
             )}
           </AnimatePresence>
-        </div>
 
-        {/* PTT Button */}
-        <div className="relative z-10">
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-10">
+            <div className="w-[400px] h-[400px] radial-track" />
+            <div className="absolute w-[600px] h-[600px] radial-track opacity-50" />
+          </div>
+
+          {/* Status Indicator */}
+          <div className="absolute top-12 w-full flex flex-col items-center z-20">
+            <AnimatePresence mode="wait">
+              {isTalking ? (
+                <motion.div
+                  key="talking"
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className="flex flex-col items-center"
+                >
+                  <div className="px-6 py-2 bg-industrial-transmitting rounded-full mb-4 shadow-[0_0_30px_rgba(0,255,65,0.3)]">
+                    <span className="text-black font-black tracking-tighter text-lg uppercase">TRANSMITTING</span>
+                  </div>
+                  
+                  {noiseCancelling && isVoiceDetected && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="flex items-center gap-3 px-4 py-1.5 rounded-2xl bg-industrial-transmitting/10 border border-industrial-transmitting/30"
+                    >
+                      <ShieldCheck size={18} className="text-industrial-transmitting" />
+                      <span className="data-value text-industrial-transmitting uppercase">AI VOICE ISOLATION ACTIVE</span>
+                    </motion.div>
+                  )}
+
+                  <div className="mt-8">
+                    <AudioVisualizer isActive={true} color="#00FF41" volume={volume} />
+                  </div>
+                </motion.div>
+              ) : activeSpeaker ? (
+                <motion.div
+                  key="receiving"
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -20 }}
+                  className="flex flex-col items-center"
+                >
+                  <div className="px-6 py-2 bg-industrial-receiving rounded-full mb-4 shadow-[0_0_30px_rgba(0,163,255,0.3)]">
+                    <span className="text-black font-black tracking-tighter text-lg uppercase">RECEIVING</span>
+                  </div>
+                  <span className="text-2xl font-black text-white uppercase tracking-tighter mb-4">{activeSpeaker}</span>
+                  <div className="mt-4">
+                    <AudioVisualizer isActive={true} color="#00A3FF" volume={40} />
+                  </div>
+                </motion.div>
+              ) : (
+                <motion.div
+                  key="idle"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="flex flex-col items-center"
+                >
+                  <span className="status-label text-industrial-muted text-lg">STANDBY</span>
+                  <div className="mt-8">
+                    <AudioVisualizer isActive={false} />
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+        </main>
+
+        {/* MASSIVE PTT BUTTON - 1/3 Height */}
+        <footer className="h-[35vh] bg-industrial-card border-t-4 border-white/5 relative z-30 flex items-center justify-center px-8 pb-12">
+          <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 w-24 h-2 bg-industrial-muted/20 rounded-full" />
+          
           <motion.div
-            animate={isTalking ? { scale: [1, 1.05, 1] } : { scale: 1 }}
-            transition={{ repeat: Infinity, duration: 2 }}
-            className={cn(
-              "w-56 h-56 rounded-full border-2 flex items-center justify-center transition-colors duration-300",
-              isTalking ? "border-industrial-accent ptt-button-glow" : "border-white/10"
-            )}
+            animate={isTalking ? { scale: [1, 1.03, 1] } : { scale: 1 }}
+            transition={{ repeat: Infinity, duration: 1.5 }}
+            className="w-full h-full max-w-sm flex items-center justify-center"
           >
             <motion.button
               onMouseDown={handlePTTDown}
               onMouseUp={handlePTTUp}
               onTouchStart={handlePTTDown}
               onTouchEnd={handlePTTUp}
-              whileTap={{ scale: 0.92 }}
+              whileTap={{ scale: 0.94 }}
               className={cn(
-                "w-48 h-48 rounded-full flex flex-col items-center justify-center transition-all duration-200 shadow-2xl",
+                "w-full h-full rounded-[48px] flex flex-col items-center justify-center transition-all duration-300 shadow-2xl rugged-border",
                 isTalking 
-                  ? "bg-industrial-accent text-white" 
-                  : "bg-industrial-card text-industrial-muted hover:bg-white/5"
+                  ? "bg-industrial-transmitting text-black ptt-button-glow-transmitting" 
+                  : activeSpeaker
+                    ? "bg-industrial-receiving/20 text-industrial-receiving border-industrial-receiving/30 ptt-button-glow-receiving"
+                    : "bg-industrial-idle text-industrial-muted hover:bg-industrial-idle/80"
               )}
             >
-              <Mic size={48} className={cn("mb-2", isTalking && "animate-pulse")} />
-              <span className="font-bold tracking-widest text-sm">PUSH TO TALK</span>
+              <div className={cn(
+                "w-24 h-24 rounded-full flex items-center justify-center mb-4 transition-colors",
+                isTalking ? "bg-black/10" : "bg-white/5"
+              )}>
+                <Mic size={56} className={cn(isTalking && "animate-pulse")} />
+              </div>
+              <span className="font-black tracking-tighter text-2xl uppercase">
+                {isTalking ? 'RELEASE TO STOP' : 'PUSH TO TALK'}
+              </span>
+              <div className="mt-4 flex items-center gap-3 opacity-50">
+                <Zap size={16} />
+                <span className="status-label text-inherit">LOW LATENCY MODE</span>
+              </div>
             </motion.button>
           </motion.div>
-        </div>
-      </main>
 
-      {/* Bottom Controls */}
-      <footer className="px-6 py-8 bg-industrial-card/80 backdrop-blur-xl border-t border-white/5 rounded-t-[32px]">
-        <div className="grid grid-cols-2 gap-4">
-          <button 
-            onClick={() => setNoiseCancelling(!noiseCancelling)}
-            className={cn(
-              "flex flex-col items-center justify-center p-4 rounded-2xl border transition-all",
-              noiseCancelling 
-                ? "bg-industrial-safe/10 border-industrial-safe/30 text-industrial-safe" 
-                : "bg-white/5 border-white/10 text-industrial-muted"
-            )}
-          >
-            <ShieldCheck size={20} className="mb-2" />
-            <span className="status-label text-inherit">AI Noise Cancel</span>
-            <span className="data-value mt-1">{noiseCancelling ? 'ACTIVE' : 'DISABLED'}</span>
-          </button>
-
-          <button className="flex flex-col items-center justify-center p-4 rounded-2xl bg-white/5 border border-white/10 text-industrial-muted hover:bg-white/10 transition-all">
-            <Zap size={20} className="mb-2" />
-            <span className="status-label text-inherit">Audio Profile</span>
-            <span className="data-value mt-1">INDUSTRIAL_MAX</span>
-          </button>
-        </div>
-
-        <div className="flex items-center justify-between mt-8 px-2">
-          <button className="p-3 rounded-full bg-white/5 text-industrial-muted hover:text-white transition-colors">
-            <Settings size={20} />
-          </button>
-          <div className="flex items-center gap-4">
-            <div className="flex flex-col items-end">
-              <span className="status-label">Signal</span>
-              <div className="flex gap-0.5 mt-1">
-                {[1, 2, 3, 4].map((i) => (
-                  <div key={i} className={cn("w-1 rounded-full", i <= 3 ? "bg-industrial-safe h-3" : "bg-white/10 h-3")} />
-                ))}
-              </div>
-            </div>
-            <button className="p-3 rounded-full bg-white/5 text-industrial-muted hover:text-white transition-colors">
-              <Volume2 size={20} />
+          {/* Quick Access Controls */}
+          <div className="absolute top-4 right-8 flex flex-col gap-4">
+            <button 
+              onClick={() => setNoiseCancelling(!noiseCancelling)}
+              className={cn(
+                "p-5 rounded-3xl border transition-all shadow-xl",
+                noiseCancelling 
+                  ? "bg-industrial-transmitting/10 border-industrial-transmitting/30 text-industrial-transmitting" 
+                  : "bg-white/5 border-white/10 text-industrial-muted"
+              )}
+            >
+              <ShieldCheck size={32} />
+            </button>
+            <button className="p-5 rounded-3xl bg-white/5 border border-white/10 text-industrial-muted shadow-xl">
+              <Volume2 size={32} />
             </button>
           </div>
-        </div>
-      </footer>
-    </motion.div>
-  );
+          
+          <div className="absolute top-4 left-8">
+            <button className="p-5 rounded-3xl bg-white/5 border border-white/10 text-industrial-muted shadow-xl">
+              <Settings size={32} />
+            </button>
+          </div>
+        </footer>
+      </motion.div>
+    );
+  };
 
   return (
     <div className="flex flex-col h-screen max-w-md mx-auto bg-industrial-bg overflow-hidden select-none">
