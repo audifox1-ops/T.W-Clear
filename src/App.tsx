@@ -75,6 +75,34 @@ const RemoteAudio: React.FC<RemoteAudioProps> = ({ stream, volumeMultiplier }) =
   const audioRef = useRef<HTMLAudioElement>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
+  const destNodeRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+
+  // 스피커 출력 강제 전환 (setSinkId)
+  const forceSpeakerOutput = useCallback(async (element: HTMLAudioElement) => {
+    if (!('setSinkId' in element)) {
+      console.warn('이 브라우저는 setSinkId를 지원하지 않습니다.');
+      return;
+    }
+
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioOutputs = devices.filter(device => device.kind === 'audiooutput');
+      
+      // 'speaker', 'loudspeaker', 'built-in speaker' 등의 키워드가 포함된 장치 찾기
+      const speaker = audioOutputs.find(device => 
+        device.label.toLowerCase().includes('speaker') || 
+        device.label.toLowerCase().includes('loudspeaker') ||
+        device.label.toLowerCase().includes('스피커')
+      ) || audioOutputs[0]; // 못 찾으면 첫 번째 출력 장치 선택
+
+      if (speaker) {
+        await (element as any).setSinkId(speaker.deviceId);
+        console.log(`오디오 출력을 다음 장치로 설정함: ${speaker.label}`);
+      }
+    } catch (err) {
+      console.error('스피커 전환 중 오류 발생:', err);
+    }
+  }, []);
 
   useEffect(() => {
     if (!stream) return;
@@ -88,31 +116,52 @@ const RemoteAudio: React.FC<RemoteAudioProps> = ({ stream, volumeMultiplier }) =
     const source = ctx.createMediaStreamSource(stream);
     const gainNode = ctx.createGain();
     
-    // 기본 볼륨의 2.5배 증폭 (현장 소음 대응)
-    gainNode.gain.value = volumeMultiplier * 2.5; 
+    // 초기 볼륨 설정
+    const initialGain = volumeMultiplier * 3.0;
+    gainNode.gain.setTargetAtTime(initialGain, ctx.currentTime, 0.01);
+    
+    // MediaStreamAudioDestinationNode를 사용하여 증폭된 스트림 생성
+    const dest = ctx.createMediaStreamDestination();
     
     source.connect(gainNode);
-    gainNode.connect(ctx.destination);
+    gainNode.connect(dest);
 
     sourceNodeRef.current = source;
     gainNodeRef.current = gainNode;
+    destNodeRef.current = dest;
+
+    if (audioRef.current) {
+      // 증폭된 스트림을 오디오 태그에 연결
+      audioRef.current.srcObject = dest.stream;
+      forceSpeakerOutput(audioRef.current);
+    }
 
     return () => {
       source.disconnect();
       gainNode.disconnect();
+      gainNodeRef.current = null;
     };
-  }, [stream, volumeMultiplier]);
+  }, [stream, forceSpeakerOutput]);
+
+  useEffect(() => {
+    if (gainNodeRef.current) {
+      const ctx = gainNodeRef.current.context;
+      const targetGain = volumeMultiplier * 3.0;
+      gainNodeRef.current.gain.setTargetAtTime(targetGain, ctx.currentTime, 0.01);
+    }
+  }, [volumeMultiplier]);
 
   return (
     <audio
       ref={audioRef}
       autoPlay
       playsInline
+      muted={false} // 절대 음소거되지 않아야 함 (상대방 목소리)
       style={{ display: 'none' }}
       onLoadedMetadata={() => {
         if (audioRef.current) {
           audioRef.current.volume = 1.0; // HTML 오디오 볼륨 최대치
-          audioRef.current.srcObject = stream;
+          forceSpeakerOutput(audioRef.current);
         }
       }}
     />
@@ -155,6 +204,59 @@ export default function App() {
   const [showVolumeControl, setShowVolumeControl] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   
+  // Screen Wake Lock 상태 관리
+  const wakeLockRef = useRef<any>(null);
+
+  const requestWakeLock = useCallback(async () => {
+    if ('wakeLock' in navigator) {
+      try {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+        console.log('Screen Wake Lock is active');
+        
+        wakeLockRef.current.addEventListener('release', () => {
+          console.log('Screen Wake Lock was released');
+        });
+      } catch (err: any) {
+        console.error(`Wake Lock Error: ${err.name}, ${err.message}`);
+      }
+    } else {
+      console.error('Wake Lock API not supported in this browser');
+    }
+  }, []);
+
+  const releaseWakeLock = useCallback(async () => {
+    if (wakeLockRef.current) {
+      try {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+      } catch (err: any) {
+        console.error(`Wake Lock Release Error: ${err.name}, ${err.message}`);
+      }
+    }
+  }, []);
+
+  // 화면 꺼짐 방지 로직 (PTT 뷰 진입 시 활성화)
+  useEffect(() => {
+    if (view === 'PTT') {
+      requestWakeLock();
+
+      // 화면 가시성 변경 시 재요청 (탭 전환 등)
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === 'visible' && view === 'PTT') {
+          requestWakeLock();
+        }
+      };
+
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      return () => {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+        releaseWakeLock();
+      };
+    } else {
+      releaseWakeLock();
+    }
+  }, [view, requestWakeLock, releaseWakeLock]);
+
   // 로그인 입력 상태
   const [inputName, setInputName] = useState('');
   const [inputGroup, setInputGroup] = useState(AVAILABLE_GROUPS[0]);
@@ -349,6 +451,8 @@ export default function App() {
     e.preventDefault();
     if (!inputName || !inputGroup) return;
 
+    // 오디오 컨텍스트 활성화 및 브라우저 권한 획득
+    await audioService.unlockAudio();
     await audioService.initialize();
 
     const newProfile = { name: inputName, group: inputGroup };

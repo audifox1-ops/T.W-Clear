@@ -44,6 +44,22 @@ export const audioService = {
     return this.audioContext;
   },
 
+  async unlockAudio() {
+    const ctx = this.getAudioContext();
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
+    // 더미 오디오 재생으로 브라우저 오디오 재생 권한 획득 (Autoplay Policy 우회)
+    const osc = ctx.createOscillator();
+    const silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
+    osc.connect(silentGain);
+    silentGain.connect(ctx.destination);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.1);
+    console.log('AudioContext unlocked and dummy audio played.');
+  },
+
   setTalking(isTalking: boolean) {
     if (this.stream) {
       this.stream.getAudioTracks().forEach(track => {
