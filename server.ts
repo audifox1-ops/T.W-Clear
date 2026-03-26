@@ -88,7 +88,7 @@ async function startServer() {
 
   // API routes
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", message: "SilentConnect Signaling Server is active" });
+    res.json({ status: "ok", message: "T.W CLEAR Signaling Server is active" });
   });
 
   // Vite middleware for development
