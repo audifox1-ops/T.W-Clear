@@ -44,9 +44,6 @@ const AVAILABLE_GROUPS = ['P15', 'P5', 'R/M', '절단', '열처리', '출하', '
 
 // --- 컴포넌트 ---
 
-/**
- * 오디오 시각화 컴포넌트
- */
 const AudioVisualizer = ({ isActive, color = '#3A3F47', volume = 0 }: { isActive: boolean, color?: string, volume?: number }) => {
   return (
     <div className="flex items-center gap-2 h-16">
@@ -63,9 +60,6 @@ const AudioVisualizer = ({ isActive, color = '#3A3F47', volume = 0 }: { isActive
   );
 };
 
-/**
- * 상대방 오디오 증폭 컴포넌트 (GainNode 활용)
- */
 interface RemoteAudioProps {
   stream: MediaStream;
   volumeMultiplier: number;
@@ -77,12 +71,8 @@ const RemoteAudio: React.FC<RemoteAudioProps & { onBlocked?: (blocked: boolean) 
   const gainNodeRef = useRef<GainNode | null>(null);
   const destNodeRef = useRef<MediaStreamAudioDestinationNode | null>(null);
 
-  // 스피커 출력 강제 전환 (setSinkId)
   const forceSpeakerOutput = useCallback(async (element: HTMLAudioElement) => {
-    if (!('setSinkId' in element)) {
-      console.warn('이 브라우저는 setSinkId를 지원하지 않습니다.');
-      return;
-    }
+    if (!('setSinkId' in element)) return;
 
     try {
       const devices = await navigator.mediaDevices.enumerateDevices();
@@ -98,7 +88,7 @@ const RemoteAudio: React.FC<RemoteAudioProps & { onBlocked?: (blocked: boolean) 
         await (element as any).setSinkId(speaker.deviceId);
       }
     } catch (err) {
-      console.error('스피커 전환 중 오류 발생:', err);
+      console.error('스피커 전환 에러:', err);
     }
   }, []);
 
@@ -108,7 +98,7 @@ const RemoteAudio: React.FC<RemoteAudioProps & { onBlocked?: (blocked: boolean) 
         await audioRef.current.play();
         if (onBlocked) onBlocked(false);
       } catch (err) {
-        console.warn('Remote audio playback blocked by browser:', err);
+        console.warn('재생 차단됨:', err);
         if (onBlocked) onBlocked(true);
       }
     }
@@ -118,9 +108,7 @@ const RemoteAudio: React.FC<RemoteAudioProps & { onBlocked?: (blocked: boolean) 
     if (!stream) return;
 
     const ctx = audioService.getAudioContext();
-    if (ctx.state === 'suspended') {
-      ctx.resume();
-    }
+    if (ctx.state === 'suspended') ctx.resume();
 
     const source = ctx.createMediaStreamSource(stream);
     const gainNode = ctx.createGain();
@@ -176,9 +164,6 @@ const RemoteAudio: React.FC<RemoteAudioProps & { onBlocked?: (blocked: boolean) 
   );
 };
 
-/**
- * 내 마이크 오디오 컴포넌트 (에코 방지를 위해 반드시 muted 처리)
- */
 const LocalAudio = ({ stream }: { stream: MediaStream | null }) => {
   const audioRef = useRef<HTMLAudioElement>(null);
 
@@ -227,9 +212,7 @@ export default function App() {
     if ('wakeLock' in navigator) {
       try {
         wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
-      } catch (err: any) {
-        console.error(`Wake Lock Error: ${err.message}`);
-      }
+      } catch (err) {}
     }
   }, []);
 
@@ -238,9 +221,7 @@ export default function App() {
       try {
         await wakeLockRef.current.release();
         wakeLockRef.current = null;
-      } catch (err: any) {
-        console.error(`Wake Lock Release Error: ${err.message}`);
-      }
+      } catch (err) {}
     }
   }, []);
 
@@ -286,7 +267,6 @@ export default function App() {
 
     peerConnections.current[targetId] = pc;
 
-    // ★ 복구됨: 트랙 지연 추가 시 재협상
     pc.onnegotiationneeded = async () => {
       try {
         if (isInitiator) {
@@ -395,9 +375,7 @@ export default function App() {
             if (pc) await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
           }
         }
-      } catch (err) {
-        console.error('MQTT message error:', err);
-      }
+      } catch (err) {}
     });
   }, [clientId, createPeerConnection, handleUserLeft]);
 
@@ -411,7 +389,8 @@ export default function App() {
         setInputName(parsed.name);
         setInputGroup(parsed.group);
         
-        audioService.unlockAudio().then(() => {
+        // 오디오 해제를 시도하되, 실패해도 무조건 화면은 넘기도록 처리
+        audioService.unlockAudio().catch(() => {}).finally(() => {
           initializeNetwork(parsed.name, parsed.group);
           setView('PTT');
         });
@@ -419,21 +398,22 @@ export default function App() {
         localStorage.removeItem('twclear_session');
       }
     }
-  }, []); // 마운트 시 단 1회 실행
+  }, []);
 
-  // ★ 복구됨: 가장 안정적인 오디오 초기화 방식
+  // 화면 진입 시 마이크 초기화 (이전의 안정적인 방식으로 복구)
   useEffect(() => {
     if (view === 'PTT') {
       audioService.initialize().then(() => {
         const stream = audioService.getStream();
         if (stream) {
-          // 최초 접속 시 마이크 무조건 끄기
           stream.getAudioTracks().forEach(track => track.enabled = false);
           setLocalStream(stream);
         }
         visualizerIntervalRef.current = window.setInterval(() => {
           setVolume(audioService.getVolume());
         }, 50);
+      }).catch(err => {
+        console.error("PTT 뷰 오디오 초기화 에러:", err);
       });
     } else {
       if (visualizerIntervalRef.current) clearInterval(visualizerIntervalRef.current);
@@ -443,7 +423,7 @@ export default function App() {
     };
   }, [view]);
 
-  // ★ 복구됨: 로컬 스트림이 늦게 준비되어도 기존 통신망에 무조건 연결해주는 로직
+  // 새로운 트랙 자동 연결
   useEffect(() => {
     if (localStream) {
       (Object.values(peerConnections.current) as RTCPeerConnection[]).forEach(pc => {
@@ -468,24 +448,25 @@ export default function App() {
     };
   }, [clientId, profile]);
 
-  // 수동 접속 핸들러
+  // ★ 블로킹(접속 지연)을 모두 없앤 원본 접속 핸들러
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputName || !inputGroup) return;
 
-    await audioService.unlockAudio(); // 브라우저 소리 잠금 강제 해제
+    // 브라우저 소리 잠금을 해제하되, 완료되기를 기다리다 멈추지 않도록 catch 추가
+    await audioService.unlockAudio().catch(() => {});
 
     const newProfile = { name: inputName, group: inputGroup };
     setProfile(newProfile);
     localStorage.setItem('twclear_session', JSON.stringify(newProfile));
     
+    // 막힘없이 바로 네트워크 연결 및 화면 전환!
     initializeNetwork(inputName, inputGroup);
     setView('PTT');
 
     if ('vibrate' in navigator) navigator.vibrate(100);
   };
 
-  // 로그아웃 핸들러
   const handleLogout = () => {
     localStorage.removeItem('twclear_session');
     if (mqttClientRef.current && profile) {
@@ -535,14 +516,12 @@ export default function App() {
     if ('vibrate' in navigator) navigator.vibrate(50);
   };
 
-  // 무전 시작/종료 핸들러 (버그 픽스 완료)
   const handlePTTStart = useCallback(() => {
-    // 주의: 모바일 터치 씹힘을 막기 위해 e.preventDefault()를 제거했습니다.
     if (activeSpeaker || !localStream || isTalking) return;
     
     try {
       localStream.getAudioTracks().forEach(track => {
-        track.enabled = true; // 마이크 전원 ON
+        track.enabled = true;
       });
       
       audioService.setTalking(true);
@@ -555,16 +534,14 @@ export default function App() {
         }));
       }
       if ('vibrate' in navigator) navigator.vibrate(80);
-    } catch (err) {
-      console.error('PTT 시작 실패:', err);
-    }
+    } catch (err) {}
   }, [activeSpeaker, clientId, profile, localStream, isTalking]);
 
   const handlePTTEnd = useCallback(() => {
     if (!isTalking || !localStream) return;
     
     localStream.getAudioTracks().forEach(track => {
-      track.enabled = false; // 마이크 전원 즉시 OFF
+      track.enabled = false;
     });
 
     audioService.setTalking(false);
