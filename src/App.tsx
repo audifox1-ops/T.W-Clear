@@ -220,6 +220,17 @@ export default function App() {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [isAudioBlocked, setIsAudioBlocked] = useState(false);
   
+  // 로그인 입력 상태
+  const [inputName, setInputName] = useState('');
+  const [inputGroup, setInputGroup] = useState(AVAILABLE_GROUPS[0]);
+
+  // WebRTC 및 MQTT 상태
+  const clientId = useMemo(() => Math.random().toString(36).substring(2, 15), []);
+  const mqttClientRef = useRef<MqttClient | null>(null);
+  const peerConnections = useRef<Record<string, RTCPeerConnection>>({});
+  const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
+  const visualizerIntervalRef = useRef<number | null>(null);
+  
   // Screen Wake Lock 상태 관리
   const wakeLockRef = useRef<any>(null);
 
@@ -256,7 +267,6 @@ export default function App() {
     if (view === 'PTT') {
       requestWakeLock();
 
-      // 화면 가시성 변경 시 재요청 (탭 전환 등)
       const handleVisibilityChange = () => {
         if (document.visibilityState === 'visible' && view === 'PTT') {
           requestWakeLock();
@@ -272,32 +282,6 @@ export default function App() {
       releaseWakeLock();
     }
   }, [view, requestWakeLock, releaseWakeLock]);
-
-  // 로그인 입력 상태
-  const [inputName, setInputName] = useState('');
-  const [inputGroup, setInputGroup] = useState(AVAILABLE_GROUPS[0]);
-
-  // WebRTC 및 MQTT 상태
-  const clientId = useMemo(() => Math.random().toString(36).substring(2, 15), []);
-  const mqttClientRef = useRef<MqttClient | null>(null);
-  const peerConnections = useRef<Record<string, RTCPeerConnection>>({});
-  const [remoteStreams, setRemoteStreams] = useState<Record<string, MediaStream>>({});
-  const visualizerIntervalRef = useRef<number | null>(null);
-
-  // 로컬 스트림이 준비되면 모든 기존 피어 연결에 트랙 추가
-  useEffect(() => {
-    if (localStream) {
-      (Object.values(peerConnections.current) as RTCPeerConnection[]).forEach(pc => {
-        const senders = pc.getSenders();
-        localStream.getTracks().forEach(track => {
-          const alreadyAdded = senders.some(s => s.track === track);
-          if (!alreadyAdded) {
-            pc.addTrack(track, localStream);
-          }
-        });
-      });
-    }
-  }, [localStream]);
 
   // 사용자 퇴장 처리
   const handleUserLeft = useCallback((userId: string) => {
@@ -329,6 +313,25 @@ export default function App() {
 
     peerConnections.current[targetId] = pc;
 
+    // ★ 중요: 늦게 트랙이 추가될 때를 대비한 재협상 로직
+    pc.onnegotiationneeded = async () => {
+      try {
+        if (isInitiator) {
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          if (mqttClientRef.current) {
+            mqttClientRef.current.publish(`twclear/peer/${targetId}`, JSON.stringify({
+              type: 'offer',
+              from: clientId,
+              offer
+            }));
+          }
+        }
+      } catch (err) {
+        console.error('재협상 에러:', err);
+      }
+    };
+
     pc.onicecandidate = (event) => {
       if (event.candidate && mqttClientRef.current) {
         mqttClientRef.current.publish(`twclear/peer/${targetId}`, JSON.stringify({
@@ -352,6 +355,7 @@ export default function App() {
       }
     };
 
+    // 항상 최신의 단일 스트림(singleton) 객체를 가져옵니다.
     const stream = audioService.getStream();
     if (stream) {
       const senders = pc.getSenders();
@@ -442,62 +446,82 @@ export default function App() {
     });
   }, [clientId, createPeerConnection, handleUserLeft]);
 
-  // 자동 접속 (Session Persistence)
+  // 자동 접속 (Session Persistence) - 의존성 배열을 비워 한 번만 실행되도록 수정
   useEffect(() => {
     const saved = localStorage.getItem('twclear_session');
-    if (saved) {
+    if (saved && view === 'AUTH') {
       try {
         const parsed = JSON.parse(saved);
         setProfile(parsed);
         setInputName(parsed.name);
         setInputGroup(parsed.group);
-        initializeNetwork(parsed.name, parsed.group);
-        setView('PTT');
+        
+        // ★ 중요: 자동 로그인 시에도 오디오를 완전히 세팅한 뒤에 네트워크 연결
+        audioService.unlockAudio().then(() => {
+          audioService.initialize().then(() => {
+            const stream = audioService.getStream();
+            if (stream) {
+              // 최초 접속 시 마이크를 꺼둡니다. (PTT를 누를 때만 활성화)
+              stream.getAudioTracks().forEach(track => track.enabled = false);
+              setLocalStream(stream);
+            }
+            initializeNetwork(parsed.name, parsed.group);
+            setView('PTT');
+          });
+        });
       } catch (e) {
         localStorage.removeItem('twclear_session');
       }
     }
-  }, [initializeNetwork]);
+  }, []); // 의존성 배열 비움 (마운트 시 단 1회 실행)
 
-  // 오디오 서비스 관리
+  // 오디오 시각화 및 클린업 관리
   useEffect(() => {
-    if (view === 'PTT') {
-      audioService.initialize().then(() => {
-        setLocalStream(audioService.getStream());
-        visualizerIntervalRef.current = window.setInterval(() => {
-          setVolume(audioService.getVolume());
-        }, 50);
-      });
+    if (view === 'PTT' && localStream) {
+      visualizerIntervalRef.current = window.setInterval(() => {
+        setVolume(audioService.getVolume());
+      }, 50);
     } else {
       if (visualizerIntervalRef.current) clearInterval(visualizerIntervalRef.current);
-      audioService.stop();
-      setLocalStream(null);
     }
+
     return () => {
       if (visualizerIntervalRef.current) clearInterval(visualizerIntervalRef.current);
+    };
+  }, [view, localStream]);
+
+  // 페이지 종료 시 클린업
+  useEffect(() => {
+    return () => {
       audioService.stop();
       if (mqttClientRef.current && profile) {
         mqttClientRef.current.publish(`twclear/channel/${profile.group}`, JSON.stringify({ type: 'leave', from: clientId }));
         mqttClientRef.current.end();
       }
     };
-  }, [view, clientId, profile]);
+  }, [clientId, profile]);
 
-  // 접속 핸들러
+  // 수동 접속 핸들러
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputName || !inputGroup) return;
 
-    // 오디오 컨텍스트 활성화 및 브라우저 권한 획득
+    // 오디오 컨텍스트 활성화 및 브라우저 권한 즉시 획득
     await audioService.unlockAudio();
     await audioService.initialize();
+    
+    const stream = audioService.getStream();
+    if (stream) {
+      // 최초 접속 시 마이크를 꺼둡니다.
+      stream.getAudioTracks().forEach(track => track.enabled = false);
+      setLocalStream(stream);
+    }
 
     const newProfile = { name: inputName, group: inputGroup };
     setProfile(newProfile);
-    
-    // 세션 정보 저장 (Auto-Login용)
     localStorage.setItem('twclear_session', JSON.stringify(newProfile));
     
+    // 오디오 준비 완료 후 네트워크 접속
     initializeNetwork(inputName, inputGroup);
     setView('PTT');
 
@@ -512,7 +536,9 @@ export default function App() {
       mqttClientRef.current.end();
       mqttClientRef.current = null;
     }
+    audioService.stop();
     setProfile(null);
+    setLocalStream(null);
     setView('AUTH');
     setActiveMembers([]);
     setRemoteStreams({});
@@ -555,11 +581,13 @@ export default function App() {
     if ('vibrate' in navigator) navigator.vibrate(50);
   };
 
-  // 무전 시작/종료
-  const handlePTTStart = useCallback(() => {
-    if (activeSpeaker || !localStream) return;
+  // 무전 시작/종료 핸들러 (중복 방지 및 강제 종료 로직 포함)
+  const handlePTTStart = useCallback((e?: any) => {
+    if (e && e.cancelable) e.preventDefault(); // 터치와 마우스 이벤트 동시 발생 방지
+    if (activeSpeaker || !localStream || isTalking) return;
+    
     try {
-      // 마이크 트랙 직접 활성화 (enabled = true)
+      // 내 마이크 트랙 전송 스위치 ON
       localStream.getAudioTracks().forEach(track => {
         track.enabled = true;
       });
@@ -577,12 +605,13 @@ export default function App() {
     } catch (err) {
       console.error('PTT 시작 실패:', err);
     }
-  }, [activeSpeaker, clientId, profile, localStream]);
+  }, [activeSpeaker, clientId, profile, localStream, isTalking]);
 
-  const handlePTTEnd = useCallback(() => {
+  const handlePTTEnd = useCallback((e?: any) => {
+    if (e && e.cancelable) e.preventDefault();
     if (!isTalking || !localStream) return;
     
-    // 마이크 트랙 직접 비활성화 (enabled = false)
+    // 내 마이크 트랙 전송 스위치 OFF (즉시 음소거)
     localStream.getAudioTracks().forEach(track => {
       track.enabled = false;
     });
@@ -837,8 +866,10 @@ export default function App() {
               <motion.button
                 onMouseDown={handlePTTStart}
                 onMouseUp={handlePTTEnd}
+                onMouseLeave={handlePTTEnd}    // ★ 마우스 이탈 시 강제 종료
                 onTouchStart={handlePTTStart}
                 onTouchEnd={handlePTTEnd}
+                onTouchCancel={handlePTTEnd}   // ★ 터치 취소(스크롤 등) 시 강제 종료
                 whileTap={{ scale: 0.92 }}
                 className={cn(
                   "w-full aspect-square max-w-[320px] rounded-full flex flex-col items-center justify-center transition-all duration-300 shadow-2xl rugged-border relative overflow-hidden",
