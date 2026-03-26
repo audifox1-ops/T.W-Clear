@@ -63,6 +63,62 @@ const AudioVisualizer = ({ isActive, color = '#3A3F47', volume = 0 }: { isActive
   );
 };
 
+/**
+ * 상대방 오디오 증폭 컴포넌트 (GainNode 활용)
+ */
+interface RemoteAudioProps {
+  stream: MediaStream;
+  volumeMultiplier: number;
+}
+
+const RemoteAudio: React.FC<RemoteAudioProps> = ({ stream, volumeMultiplier }) => {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const gainNodeRef = useRef<GainNode | null>(null);
+
+  useEffect(() => {
+    if (!stream) return;
+
+    const ctx = audioService.getAudioContext();
+    if (ctx.state === 'suspended') {
+      ctx.resume();
+    }
+
+    // Web Audio API를 통한 강제 증폭
+    const source = ctx.createMediaStreamSource(stream);
+    const gainNode = ctx.createGain();
+    
+    // 기본 볼륨의 2.5배 증폭 (현장 소음 대응)
+    gainNode.gain.value = volumeMultiplier * 2.5; 
+    
+    source.connect(gainNode);
+    gainNode.connect(ctx.destination);
+
+    sourceNodeRef.current = source;
+    gainNodeRef.current = gainNode;
+
+    return () => {
+      source.disconnect();
+      gainNode.disconnect();
+    };
+  }, [stream, volumeMultiplier]);
+
+  return (
+    <audio
+      ref={audioRef}
+      autoPlay
+      playsInline
+      style={{ display: 'none' }}
+      onLoadedMetadata={() => {
+        if (audioRef.current) {
+          audioRef.current.volume = 1.0; // HTML 오디오 볼륨 최대치
+          audioRef.current.srcObject = stream;
+        }
+      }}
+    />
+  );
+};
+
 export default function App() {
   const [view, setView] = useState<View>('AUTH');
   const [profile, setProfile] = useState<UserProfile | null>(null);
@@ -104,7 +160,6 @@ export default function App() {
   const createPeerConnection = useCallback(async (targetId: string, isInitiator: boolean, channelTopic: string) => {
     if (peerConnections.current[targetId]) return peerConnections.current[targetId];
 
-    // 구글 공개 STUN 서버 추가 (다양한 네트워크 환경 지원)
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -128,7 +183,6 @@ export default function App() {
     };
 
     pc.ontrack = (event) => {
-      // 상대방의 오디오 스트림 수신
       setRemoteStreams(prev => ({
         ...prev,
         [targetId]: event.streams[0]
@@ -159,13 +213,12 @@ export default function App() {
     return pc;
   }, [clientId, handleUserLeft]);
 
-  // 소켓 및 WebRTC 초기화 (MQTT를 이용한 Serverless Signaling)
+  // 소켓 및 WebRTC 초기화
   const initializeNetwork = useCallback((userName: string, userGroup: string) => {
     if (mqttClientRef.current) {
       mqttClientRef.current.end();
     }
     
-    // 퍼블릭 MQTT 브로커를 통한 시그널링 (별도 백엔드 불필요)
     const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
     mqttClientRef.current = client;
 
@@ -174,7 +227,6 @@ export default function App() {
 
     client.on('connect', () => {
       client.subscribe([channelTopic, peerTopic]);
-      // 채널 입장 알림
       client.publish(channelTopic, JSON.stringify({ type: 'join', from: clientId, name: userName }));
     });
 
@@ -184,14 +236,12 @@ export default function App() {
         
         if (topic === channelTopic) {
           if (data.type === 'join' && data.from !== clientId) {
-            // 새로운 사용자가 들어오면 내가 Initiator가 되어 연결 시도
             setActiveMembers(prev => [...new Set([...prev, data.from])]);
             await createPeerConnection(data.from, true, channelTopic);
-            // 나도 채널에 있다고 알려줌
             client.publish(`twclear/peer/${data.from}`, JSON.stringify({ type: 'hello', from: clientId, name: userName }));
           } else if (data.type === 'ptt-start' && data.from !== clientId) {
             setActiveSpeaker(data.name);
-            audioService.playBeep(); // 무전 시작 신호음 재생
+            audioService.playBeep();
           } else if (data.type === 'ptt-stop' && data.from !== clientId) {
             setActiveSpeaker(null);
           } else if (data.type === 'leave' && data.from !== clientId) {
@@ -229,6 +279,23 @@ export default function App() {
     });
   }, [clientId, createPeerConnection, handleUserLeft]);
 
+  // 자동 접속 (Session Persistence)
+  useEffect(() => {
+    const saved = localStorage.getItem('twclear_session');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        setProfile(parsed);
+        setInputName(parsed.name);
+        setInputGroup(parsed.group);
+        initializeNetwork(parsed.name, parsed.group);
+        setView('PTT');
+      } catch (e) {
+        localStorage.removeItem('twclear_session');
+      }
+    }
+  }, [initializeNetwork]);
+
   // 오디오 서비스 관리
   useEffect(() => {
     if (view === 'PTT') {
@@ -256,22 +323,41 @@ export default function App() {
     e.preventDefault();
     if (!inputName || !inputGroup) return;
 
-    // 브라우저 오디오 권한을 얻기 위해 먼저 초기화
     await audioService.initialize();
 
     const newProfile = { name: inputName, group: inputGroup };
     setProfile(newProfile);
+    
+    // 세션 정보 저장 (Auto-Login용)
+    localStorage.setItem('twclear_session', JSON.stringify(newProfile));
+    
     initializeNetwork(inputName, inputGroup);
     setView('PTT');
 
     if ('vibrate' in navigator) navigator.vibrate(100);
   };
 
+  // 로그아웃 핸들러
+  const handleLogout = () => {
+    localStorage.removeItem('twclear_session');
+    if (mqttClientRef.current && profile) {
+      mqttClientRef.current.publish(`twclear/channel/${profile.group}`, JSON.stringify({ type: 'leave', from: clientId }));
+      mqttClientRef.current.end();
+      mqttClientRef.current = null;
+    }
+    setProfile(null);
+    setView('AUTH');
+    setActiveMembers([]);
+    setRemoteStreams({});
+    (Object.values(peerConnections.current) as RTCPeerConnection[]).forEach(pc => pc.close());
+    peerConnections.current = {};
+    if ('vibrate' in navigator) navigator.vibrate(50);
+  };
+
   // 작업조 변경 핸들러
   const switchGroup = (direction: 'next' | 'prev') => {
     if (!profile) return;
     
-    // 기존 채널에서 퇴장 알림
     if (mqttClientRef.current) {
       mqttClientRef.current.publish(`twclear/channel/${profile.group}`, JSON.stringify({ type: 'leave', from: clientId }));
     }
@@ -289,11 +375,11 @@ export default function App() {
     const newProfile = { ...profile, group: newGroup };
     
     setProfile(newProfile);
+    localStorage.setItem('twclear_session', JSON.stringify(newProfile));
     setActiveMembers([]);
     setActiveSpeaker(null);
     setRemoteStreams({});
     
-    // 기존 피어 연결 종료
     (Object.values(peerConnections.current) as RTCPeerConnection[]).forEach(pc => pc.close());
     peerConnections.current = {};
     
@@ -349,21 +435,9 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen max-w-md mx-auto bg-industrial-bg overflow-hidden select-none">
-      {/* 상대방 오디오 스트림 재생 (Autoplay Policy 우회) */}
-      {Object.entries(remoteStreams).map(([id, stream]) => (
-        <audio
-          key={id}
-          autoPlay
-          playsInline
-          ref={(el) => {
-            if (el) {
-              if (el.srcObject !== stream) {
-                el.srcObject = stream;
-              }
-              el.volume = incomingVolume;
-            }
-          }}
-        />
+      {/* 상대방 오디오 증폭 재생 (GainNode + Autoplay Policy 우회) */}
+      {(Object.entries(remoteStreams) as [string, MediaStream][]).map(([id, stream]) => (
+        <RemoteAudio key={id} stream={stream} volumeMultiplier={incomingVolume} />
       ))}
 
       <AnimatePresence mode="wait">
@@ -455,8 +529,8 @@ export default function App() {
                     </div>
                   </div>
                   <button 
-                    onClick={() => setView('AUTH')}
-                    className="p-3 bg-white/5 rounded-xl text-industrial-muted"
+                    onClick={handleLogout}
+                    className="p-3 bg-white/5 rounded-xl text-industrial-muted hover:text-industrial-accent transition-colors"
                   >
                     <LogOut size={20} />
                   </button>

@@ -36,6 +36,13 @@ export const audioService = {
     return this.stream;
   },
 
+  getAudioContext() {
+    if (!this.audioContext) {
+      this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    return this.audioContext;
+  },
+
   setTalking(isTalking: boolean) {
     if (this.stream) {
       this.stream.getAudioTracks().forEach(track => {
